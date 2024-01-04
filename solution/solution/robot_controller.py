@@ -9,7 +9,7 @@ from rclpy.duration import Duration
 from geometry_msgs.msg import Twist, Pose
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan, Image
-from assessment_interfaces.msg import ItemList, ItemHolder, ItemHolders
+from assessment_interfaces.msg import ItemList, ItemHolder, ItemHolders, HomeZone
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped
 
@@ -40,6 +40,9 @@ class State(Enum):
     RETURNING = 3
     SET_GOAL = 4
     NAVIGATING = 5
+    STOPPING = 6
+    FIND_HOME = 7
+    RETURN_HOME = 8
 
 class RobotController(Node):
 
@@ -74,6 +77,8 @@ class RobotController(Node):
 
         self.items = ItemList()
         self.item_holders = ItemHolders()
+        self.item_holder = ItemHolder()
+        self.home_zone_sensor = HomeZone()
 
         self.item_subscriber = self.create_subscription(
             ItemList,
@@ -86,6 +91,12 @@ class RobotController(Node):
             '/item_holders',
             self.item_holders_callback,
             10)
+        
+        self.home_zone_subscriber = self.create_subscription(
+            HomeZone,
+            '/robot1/home_zone',
+            self.home_zone_callback,
+            10)
 
         # set initial pose for the navigator
         # get the inital pose of the robot
@@ -97,36 +108,83 @@ class RobotController(Node):
         self.items = msg
     
     def item_holders_callback(self, msg):
+
         self.item_holders = msg
+    
+    def home_zone_callback(self, msg):
+        self.home_zone_sensor = msg
 
     def control_loop(self):
-        self.get_logger().info(f"Initial pose - x: {self.initial_x}, y: {self.initial_y}, yaw: {self.initial_yaw}")
-        self.get_logger().info(f"item holders: {self.item_holders.data}")
+        #self.get_logger().info(f"Initial pose - x: {self.initial_x}, y: {self.initial_y}, yaw: {self.initial_yaw}")
+        #self.get_logger().info(f"item: {self.items.data}")
         #setting goal
 
         match self.state:
             case State.FORWARD:
+                #If camera sees an item, go for the first one
                 if len(self.items.data) > 0:
                     self.state = State.COLLECTING
                     self.get_logger().info("Transitioning to COLLECTING state")
                     return
-            case State.COLLECTING:
                 
-                if self.item_holders.data:
+                #turn to find more items
+                msg = Twist()
+                msg.angular.z = 2
+                self.cmd_vel_publisher.publish(msg)
+            
+            case State.COLLECTING:
+
+                item_held = self.item_holders.data[0]
+                #self.get_logger().info(f"homezone: {self.home_zone_sensor}")
+
+                # if it is holding an item go into the turning state
+                if item_held.holding_item == True:
                     self.previous_pose = self.pose
-                    self.state = State.SET_GOAL
-                    self.get_logger().info("Transitioning to SET_GOAL state")
+                    self.state = State.FIND_HOME
+                    self.get_logger().info("Transitioning to FIND_HOME state")
+                    return
+                
+                #if it doesnt see any items go into a finding state
+                if len(self.items.data) == 0:
+                    self.previous_pose = self.pose
+                    self.state = State.FORWARD
                     return
 
+                #once it sees an item go towards it to pick it up
                 item = self.items.data[0]
                 estimated_distance = 69.0 * float(item.diameter) ** -0.89
 
                 msg = Twist()
-                msg.linear.x = 0.25 * estimated_distance
+                msg.linear.x = 3
                 msg.angular.z = item.x / 320.0
 
                 self.cmd_vel_publisher.publish(msg)
+            
+            case State.FIND_HOME:
                 
+                if self.home_zone_sensor.visible==True and -100 < self.home_zone_sensor.x < 100:
+                    self.previous_pose = self.pose
+                    self.state = State.RETURN_HOME
+                    self.get_logger().info("Transitioning to RETURN_HOME state")
+                    return
+                
+                # find the home zone
+                msg = Twist()
+                msg.angular.z = 2
+                self.cmd_vel_publisher.publish(msg)
+                self.get_logger().info(f"homezone: {self.home_zone_sensor}")
+            
+            case State.RETURN_HOME:
+                item_held = self.item_holders.data[0]
+                if item_held.holding_item == False:
+                    self.state = State.FORWARD
+                    self.get_logger().info("Transitioning to FORWARD state")
+                    return
+
+                msg = Twist()
+                msg.linear.x = LINEAR_VELOCITY
+                self.cmd_vel_publisher.publish(msg)
+
             case State.SET_GOAL:
 
                 goal_pose = PoseStamped()
@@ -160,6 +218,11 @@ class RobotController(Node):
                         print('Goal failed!')
                     else:
                         print('Goal has an invalid return status!')
+            
+            case State.STOPPING:
+                msg = Twist()
+                self.cmd_vel_publisher.publish(msg)
+                self.get_logger().info(f"Stopping: {msg}")
 
     def destroy_node(self):
         super().destroy_node()
