@@ -82,9 +82,6 @@ class RobotController(Node):
 
         self.navigator.waitUntilNav2Active()
 
-        
-
-
         self.cmd_vel_publisher = self.create_publisher(Twist, '/robot1/cmd_vel', 10)
 
         self.items = ItemList()
@@ -173,9 +170,8 @@ class RobotController(Node):
         #self.get_logger().info(f"item: {self.items.data}")
         match self.state:
             case State.DRIVE:
-                #self.get_logger().info(f"item_holders: {self.item_holders.data}")
                 
-                # several different paths for the robot to take
+                # several different paths for the robot to take, decides randomly
                 self.get_logger().info("in drive state")
 
                 path_y = [-2.0, 0.0, 2.0]
@@ -201,13 +197,13 @@ class RobotController(Node):
 
                 path.append(goal_pose_2)
 
+                # goes through the poses
                 self.navigator.goThroughPoses(path)
 
                 #self.get_logger().info("Setting goal pose:")
                 #self.get_logger().info(f"Goal pose: {goal_pose}")
 
                 self.state = State.NAVIGATING
-
 
             case State.FINDING:
 
@@ -224,13 +220,14 @@ class RobotController(Node):
                     return
             
             case State.COLLECTING:
-
+                
+                # object detection using the robots lidar, if it detects an object within the SCAN_THRESHOLD it will be assigned a new path to take using nav2
                 if self.scan_triggered[SCAN_FRONT]:
                     self.previous_yaw = self.yaw
                     self.state = State.DRIVE
                     self.turn_angle = random.uniform(150, 170)
                     self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                    self.get_logger().info("Detected obstacle in front, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
+                    self.get_logger().info("Detected obstacle in front, planning new path")
                     return
                 
                 if self.scan_triggered[SCAN_LEFT] or self.scan_triggered[SCAN_RIGHT]:
@@ -240,19 +237,18 @@ class RobotController(Node):
 
                     if self.scan_triggered[SCAN_LEFT] and self.scan_triggered[SCAN_RIGHT]:
                         self.turn_direction = random.choice([TURN_LEFT, TURN_RIGHT])
-                        self.get_logger().info("Detected obstacle to both the left and right, turning " + ("left" if self.turn_direction == TURN_LEFT else "right") + f" by {self.turn_angle:.2f} degrees")
+                        self.get_logger().info("Detected obstacle to both the left and right, planning new path")
                     elif self.scan_triggered[SCAN_LEFT]:
                         self.turn_direction = TURN_RIGHT
-                        self.get_logger().info(f"Detected obstacle to the left, turning right by {self.turn_angle} degrees")
+                        self.get_logger().info(f"Detected obstacle to the left, planning new path")
                     else: # self.scan_triggered[SCAN_RIGHT]
                         self.turn_direction = TURN_LEFT
-                        self.get_logger().info(f"Detected obstacle to the right, turning left by {self.turn_angle} degrees")
+                        self.get_logger().info(f"Detected obstacle to the right, planning new path")
                     return
                 self.get_logger().info(f"item_holders: {self.item_holders.data}")
 
+                # if it is holding an item return to the home zone to collect the item
                 item_held = self.item_holders.data[0]
-
-                # if it is holding an item go into the turning state
                 if item_held.holding_item == True:
                     self.previous_pose = self.pose
                     self.state = State.RETURN_HOME
@@ -267,16 +263,17 @@ class RobotController(Node):
 
                 # once it sees an item go towards it to pick it up
                 item = self.items.data[0]
-                estimated_distance = 69.0 * float(item.diameter) ** -0.89
-
+                #estimated_distance = 69.0 * float(item.diameter) ** -0.89
                 msg = Twist()
                 msg.linear.x = LINEAR_VELOCITY #0.25 * estimated_distance
+                # chooses the correct angle to turn to in order to drive towards the item
                 msg.angular.z = item.x / 320.0
 
                 self.cmd_vel_publisher.publish(msg)
             
             case State.TURNING:
 
+                # if it sees an item whilst turning go to collect it
                 if len(self.items.data) > 0:
                     self.state = State.COLLECTING
                     return
@@ -287,13 +284,15 @@ class RobotController(Node):
             
             case State.RETURN_HOME:
                 
+                # once delivered to the home zone cancel the current task and go into the drive state to assign a new path
                 item_held = self.item_holders.data[0]
                 if item_held.holding_item == False:
                     self.navigator.cancelTask()
                     self.state = State.DRIVE
                     self.get_logger().info("Transitioning to DRIVE state")
                     return
-
+                
+                # coordinates for the home zone
                 goal_pose = PoseStamped()
                 goal_pose.header.frame_id = 'map'
                 goal_pose.header.stamp = self.get_clock().now().to_msg()
@@ -307,7 +306,8 @@ class RobotController(Node):
                 self.get_logger().info(f"Goal pose: {goal_pose}")
 
             case State.NAVIGATING:
-
+                
+                # whilst navigating if the robot picks up an item, immediately deliver it back to the home zone
                 try:
                     item_held = self.item_holders.data[0]
                     if item_held.holding_item == True:
